@@ -88,8 +88,8 @@ def test_calculate_feature_exposure_misaligned_indices():
     with pytest.raises(ValueError, match="No overlapping indices between predictions and features."):
         exposures = neutralizer.calculate_feature_exposure(predictions, features)
 
-def test_numerai_model_predict_with_metrics():
-    """Test NumeraiModel's predict_with_metrics method."""
+def test_predict_with_metrics_basic():
+    """Test basic functionality of predict_with_metrics."""
     np.random.seed(42)
     n_samples = 100
 
@@ -98,34 +98,195 @@ def test_numerai_model_predict_with_metrics():
     target = features['feature_0'] * 0.5 + np.random.randn(n_samples) * 0.5
     target = pd.Series(target, name='target')
 
-    # Train a simple linear regression model
+    # Initialize model
     model = LinearRegression()
     model.fit(features, target)
 
-    # Initialize NumeraiModel
-    neutralizer = NumeraiNeutralizer()
     numerai_model = NumeraiModel(
         model=model,
-        neutralizer=neutralizer,
+        neutralizer=NumeraiNeutralizer(),
         features=features.columns.tolist(),
         neutralization_features=features.columns.tolist(),
         proportion=0.5
     )
 
-    # Generate predictions and metrics
+    # Test basic prediction with metrics
+    predictions, metrics = numerai_model.predict_with_metrics(
+        X=features,
+        target=target
+    )
+
+    # Basic assertions
+    assert isinstance(predictions, pd.DataFrame)
+    assert 'prediction' in predictions.columns
+    assert isinstance(metrics, dict)
+    assert 'correlation' in metrics
+    assert isinstance(metrics['correlation'], float)
+    assert 'diagnostics' in metrics
+    assert isinstance(metrics['diagnostics']['prediction_std'], float)
+    assert isinstance(metrics['diagnostics']['prediction_mean'], float)
+    assert isinstance(metrics['diagnostics']['num_rows'], int)
+    assert isinstance(metrics['diagnostics']['nulls'], int)
+
+def test_predict_with_metrics_era_wise():
+    """Test era-wise calculations in predict_with_metrics."""
+    np.random.seed(42)
+    n_samples = 200
+
+    # Create features, target, and eras
+    features = pd.DataFrame(np.random.randn(n_samples, 5), columns=[f'feature_{i}' for i in range(5)])
+    target = features['feature_0'] * 0.5 + np.random.randn(n_samples) * 0.5
+    target = pd.Series(target, name='target')
+    eras = pd.Series(np.repeat(['era1', 'era2'], n_samples//2), name='era')
+
+    # Initialize model
+    model = LinearRegression()
+    model.fit(features, target)
+
+    numerai_model = NumeraiModel(
+        model=model,
+        neutralizer=NumeraiNeutralizer(),
+        features=features.columns.tolist(),
+        neutralization_features=features.columns.tolist(),
+        proportion=0.5
+    )
+
+    # Test with era-wise calculations
     predictions, metrics = numerai_model.predict_with_metrics(
         X=features,
         target=target,
-        era_col=None  # Not using eras in this test
+        era_col=eras
     )
 
-    # Assertions
-    assert 'feature_exposure' in metrics, "Metrics should include feature_exposure"
-    assert 'max_feature_exposure' in metrics, "Metrics should include max_feature_exposure"
-    assert len(metrics['feature_exposure']) == 5, "Feature exposure length should match number of features"
+    # Era-wise metric assertions
+    assert 'era_wise' in metrics
+    assert isinstance(metrics['era_wise'], dict)
+    assert 'mean' in metrics['era_wise']
+    assert 'std' in metrics['era_wise']
+    assert 'sharpe' in metrics['era_wise']
+    assert 'per_era' in metrics['era_wise']
+    assert all(isinstance(v, float) for v in metrics['era_wise']['per_era'].values())
+    assert all(isinstance(k, str) for k in metrics['era_wise']['per_era'].keys())
 
-    # Check that max_feature_exposure is reasonable
-    assert metrics['max_feature_exposure'] > 0.0, "Max feature exposure should be positive"
+def test_predict_with_metrics_meta_model():
+    """Test meta-model calculations in predict_with_metrics."""
+    np.random.seed(42)
+    n_samples = 100
 
-    # Ensure predictions are not NaN
-    assert not predictions.isna().any().any(), "Predictions should not contain NaN values"
+    # Create features, target, and meta-model predictions
+    features = pd.DataFrame(np.random.randn(n_samples, 5), columns=[f'feature_{i}' for i in range(5)])
+    target = features['feature_0'] * 0.5 + np.random.randn(n_samples) * 0.5
+    target = pd.Series(target, name='target')
+    meta_model = pd.Series(np.random.randn(n_samples), name='meta_pred')
+
+    # Initialize model
+    model = LinearRegression()
+    model.fit(features, target)
+
+    numerai_model = NumeraiModel(
+        model=model,
+        neutralizer=NumeraiNeutralizer(),
+        features=features.columns.tolist(),
+        neutralization_features=features.columns.tolist(),
+        proportion=0.5
+    )
+
+    # Test with meta-model
+    predictions, metrics = numerai_model.predict_with_metrics(
+        X=features,
+        target=target,
+        meta_model=meta_model
+    )
+
+    # Meta-model metric assertions
+    assert 'mmc' in metrics
+    assert isinstance(metrics['mmc'], float)
+
+def test_predict_with_metrics_error_handling():
+    """Test error handling in predict_with_metrics."""
+    np.random.seed(42)
+    n_samples = 100
+
+    # Create features and model
+    features = pd.DataFrame(np.random.randn(n_samples, 5), columns=[f'feature_{i}' for i in range(5)])
+    model = LinearRegression()
+    model.fit(features, features['feature_0'])  # Simple fit for testing
+
+    numerai_model = NumeraiModel(
+        model=model,
+        neutralizer=NumeraiNeutralizer(),
+        features=features.columns.tolist(),
+        neutralization_features=features.columns.tolist(),
+        proportion=0.5
+    )
+
+    # Test with misaligned target
+    misaligned_target = pd.Series(np.random.randn(n_samples + 1), name='target')
+    with pytest.raises(ValueError, match="Target length .* does not match predictions length"):
+        predictions, metrics = numerai_model.predict_with_metrics(
+            X=features,
+            target=misaligned_target
+        )
+
+    # Test with NaN in target
+    nan_target = pd.Series(np.random.randn(n_samples), name='target')
+    nan_target.iloc[0] = np.nan
+    with pytest.raises(ValueError, match="Missing target values after alignment"):
+        predictions, metrics = numerai_model.predict_with_metrics(
+            X=features,
+            target=nan_target
+        )
+
+    # Test with NaN in meta_model
+    nan_meta = pd.Series(np.random.randn(n_samples), name='meta_pred')
+    nan_meta.iloc[0] = np.nan
+    with pytest.raises(ValueError, match="Missing meta model values after alignment"):
+        predictions, metrics = numerai_model.predict_with_metrics(
+            X=features,
+            target=pd.Series(np.random.randn(n_samples), name='target'),  # Added name
+            meta_model=nan_meta
+        )
+
+def test_predict_with_metrics_feature_exposure():
+    """Test feature exposure calculations in predict_with_metrics."""
+    np.random.seed(42)
+    n_samples = 100
+
+    # Create features with known correlation
+    base_feature = np.random.randn(n_samples)
+    features = pd.DataFrame({
+        'feature_0': base_feature,
+        'feature_1': base_feature * 0.8 + np.random.randn(n_samples) * 0.2,
+        'feature_2': np.random.randn(n_samples)
+    })
+    
+    target = base_feature * 0.5 + np.random.randn(n_samples) * 0.5
+    target = pd.Series(target, name='target')
+
+    # Initialize model
+    model = LinearRegression()
+    model.fit(features, target)
+
+    numerai_model = NumeraiModel(
+        model=model,
+        neutralizer=NumeraiNeutralizer(),
+        features=features.columns.tolist(),
+        neutralization_features=features.columns.tolist(),
+        proportion=0.5
+    )
+
+    # Test feature exposure calculations
+    predictions, metrics = numerai_model.predict_with_metrics(
+        X=features,
+        target=target
+    )
+
+    # Feature exposure assertions
+    assert 'feature_exposure' in metrics
+    assert isinstance(metrics['feature_exposure'], dict)
+    assert all(isinstance(k, str) for k in metrics['feature_exposure'].keys())
+    assert all(isinstance(v, float) for v in metrics['feature_exposure'].values())
+    assert 'max_feature_exposure' in metrics
+    assert isinstance(metrics['max_feature_exposure'], float)
+    assert metrics['max_feature_exposure'] >= 0.0
+    assert metrics['max_feature_exposure'] <= 1.0

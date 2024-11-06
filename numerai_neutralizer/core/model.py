@@ -1,5 +1,7 @@
 import pandas as pd
+import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
+
 from numerai_neutralizer.utils.logging import logger
 from numerai_neutralizer.utils.validation import validate_data
 from numerai_neutralizer.core.neutralizer import NumeraiNeutralizer
@@ -119,82 +121,113 @@ class NumeraiModel:
         X: pd.DataFrame,
         meta_model: Optional[pd.Series] = None,
         target: Optional[pd.Series] = None,
-        era_col: Optional[str] = None
+        era_col: Optional[pd.Series] = None
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        """Generate predictions with comprehensive performance metrics.
-        
-        Args:
-            X: Feature data
-            meta_model: Optional meta model predictions for MMC calculation
-            target: Optional target values for correlation metrics
-            era_col: Optional era column name for era-wise metrics
-            
-        Returns:
-            Tuple of (predictions DataFrame, metrics dictionary)
-            
-        Raises:
-            ValueError: If data alignment fails or inputs are invalid
-        """
+        """Generate predictions with comprehensive performance metrics."""
         try:
-            # Generate predictions
+            # Generate predictions and ensure DataFrame format
+            logger.info("Generating predictions...")
             predictions = self.predict(X)
+            
+            # Convert predictions to DataFrame if necessary
+            if isinstance(predictions, np.ndarray):
+                predictions = pd.DataFrame(predictions, index=X.index, columns=['prediction'])
+            elif isinstance(predictions, pd.Series):
+                predictions = predictions.to_frame('prediction')
+            elif not isinstance(predictions, pd.DataFrame):
+                raise ValueError(f"Predictions must be DataFrame, Series or ndarray, got {type(predictions)}")
+                
             metrics: Dict[str, Any] = {}
             
             if target is not None:
-                # Align target with predictions
+                # Ensure target has a name
+                if target.name is None:
+                    target = target.copy()
+                    target.name = 'target'
+                    
+                # Explicitly check length before reindexing
+                if len(target) != len(predictions):
+                    raise ValueError(f"Target length ({len(target)}) does not match predictions length ({len(predictions)})")
+                    
+                # Ensure target is aligned with predictions
                 target = target.reindex(predictions.index)
                 if target.isna().any():
                     raise ValueError("Missing target values after alignment")
+                    
+                # Validate meta_model before any calculations
+                if meta_model is not None:
+                    if len(meta_model) != len(predictions):
+                        raise ValueError("Meta model predictions length mismatch")
+                        
+                    meta_model = meta_model.reindex(predictions.index)
+                    if meta_model.isna().any():
+                        raise ValueError("Missing meta model values after alignment")
                 
                 logger.info("Calculating correlation metrics...")
-                
-                # Calculate overall correlation
-                metrics["correlation"] = self.neutralizer.correlator.numerai_correlation(
-                    predictions, target
+                # Calculate correlations using the proper method
+                corrs = self.neutralizer.correlator.numerai_correlation(
+                    predictions=predictions,
+                    targets=target
                 )
-                
-                # Calculate era-wise metrics if era_col provided
-                if era_col is not None and era_col in X.columns:
-                    era_metrics = (
-                        X.groupby(era_col)
-                        .apply(lambda x: self.neutralizer.correlator.numerai_correlation(
-                            predictions.loc[x.index], 
-                            target.loc[x.index]
-                        ))
-                    )
-                    metrics["era_wise"] = {
-                        "mean": era_metrics.mean(),
-                        "std": era_metrics.std(),
-                        "sharpe": era_metrics.mean() / era_metrics.std() if era_metrics.std() != 0 else 0,
-                        "per_era": era_metrics.to_dict()
-                    }
+                metrics["correlation"] = float(corrs.iloc[0])
                 
                 # Calculate MMC if meta_model provided
                 if meta_model is not None:
                     logger.info("Calculating MMC...")
-                    meta_model = meta_model.reindex(predictions.index)
-                    if meta_model.isna().any():
-                        raise ValueError("Missing meta model values after alignment")
-                        
-                    metrics["mmc"] = self.neutralizer.calculate_mmc(
-                        predictions, meta_model, target
+                    
+                    # Calculate correlation with meta model predictions
+                    meta_correlation = self.neutralizer.correlator.pearson(
+                        target=target,
+                        predictions=meta_model
                     )
                     
+                    # Calculate correlation with our predictions
+                    our_correlation = self.neutralizer.correlator.pearson(
+                        target=target,
+                        predictions=predictions['prediction']
+                    )
+                    
+                    # MMC is the difference between our correlation and meta correlation
+                    metrics["mmc"] = float(our_correlation - meta_correlation)
+                    
+                # Calculate era-wise metrics if era_col provided
+                if era_col is not None:
+                    era_scores = {}
+                    for era in era_col.unique():
+                        mask = era_col == era
+                        era_preds = predictions[mask]
+                        era_target = target[mask]
+                        
+                        if len(era_preds) > 0:
+                            era_corrs = self.neutralizer.correlator.numerai_correlation(
+                                predictions=era_preds,
+                                targets=era_target
+                            )
+                            era_scores[str(era)] = float(era_corrs.iloc[0])
+                    
+                    era_values = np.array(list(era_scores.values()))
+                    metrics["era_wise"] = {
+                        "mean": float(np.mean(era_values)),
+                        "std": float(np.std(era_values)),
+                        "sharpe": float(np.mean(era_values) / np.std(era_values)) if np.std(era_values) != 0 else 0,
+                        "per_era": era_scores
+                    }
+                
                 # Calculate feature exposure
                 logger.info("Calculating feature exposure...")
                 metrics["feature_exposure"] = self.neutralizer.calculate_feature_exposure(
-                    predictions["prediction"],
+                    predictions['prediction'],
                     X[self.neutralization_features]
-                )
+                ).to_dict()
                 
-                metrics["max_feature_exposure"] = metrics["feature_exposure"].max()
+                metrics["max_feature_exposure"] = float(max(abs(v) for v in metrics["feature_exposure"].values()))
                 
                 # Add diagnostics
                 metrics["diagnostics"] = {
-                    "prediction_std": predictions.std().to_dict(),
-                    "prediction_mean": predictions.mean().to_dict(),
-                    "num_rows": len(predictions),
-                    "nulls": predictions.isna().sum().to_dict()
+                    "prediction_std": float(predictions['prediction'].std()),
+                    "prediction_mean": float(predictions['prediction'].mean()),
+                    "num_rows": int(len(predictions)),
+                    "nulls": int(predictions.isna().sum().sum())
                 }
                 
             return predictions, metrics
@@ -202,7 +235,7 @@ class NumeraiModel:
         except Exception as e:
             logger.error(f"Error in predict_with_metrics: {str(e)}")
             raise
-            
+                
     def get_feature_importance(self) -> Optional[pd.Series]:
         """Get feature importance if model supports it.
         
