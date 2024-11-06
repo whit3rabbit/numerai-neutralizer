@@ -129,21 +129,25 @@ class NumeraiNeutralizer:
         targets: pd.Series,
         top_bottom: Optional[int] = None
     ) -> pd.Series:
-        """Calculate Meta-Model Contribution scores."""
+        """Calculate Meta-Model Contribution scores using Numerai's canonical method."""
         try:
-            # Strict index alignment
+            # Strict index alignment and sorting
             common_idx = predictions.index.intersection(meta_model.index).intersection(targets.index)
             if len(common_idx) == 0:
                 raise ValueError("No overlapping indices between predictions, meta model, and targets")
-                
-            predictions = predictions.loc[common_idx]
-            meta_model = meta_model.loc[common_idx]
-            targets = targets.loc[common_idx]
             
-            # Transform data
-            p = DataProcessor.gaussian(DataProcessor.rank(predictions))
+            predictions = predictions.loc[common_idx].sort_index()
+            meta_model = meta_model.loc[common_idx].sort_index()
+            targets = targets.loc[common_idx].sort_index()
+            
+            # Transform predictions using tie-kept ranking
+            p = DataProcessor.gaussian(
+                DataProcessor.rank(predictions, method="average")
+            )
+            
+            # Transform meta model predictions
             m = DataProcessor.gaussian(
-                DataProcessor.rank(meta_model.to_frame())
+                DataProcessor.rank(meta_model.to_frame(), method="average")
             )[meta_model.name]
             
             # Check for infinities
@@ -154,28 +158,32 @@ class NumeraiNeutralizer:
             neutral_preds = np.zeros_like(p.values)
             for i in range(p.shape[1]):
                 try:
+                    # Use orthogonalization via fast_neutralize
                     neutral_preds[:, i] = self.fast_neutralize(
-                        p.iloc[:, i].values, 
-                        m
+                        p.iloc[:, i].values,
+                        m.values
                     )
                 except ValueError as e:
                     logger.warning(f"Skipping column {i} due to neutralization error: {str(e)}")
                     continue
-                    
-            # Process targets
+            
+            # Process targets according to Numerai's scale
             if (targets >= 0).all() and (targets <= 1).all():
                 targets = targets * 4
             targets = targets - targets.mean()
             
-            # Calculate MMC
+            # Calculate MMC with optional top/bottom filtering
             if top_bottom:
                 return self._calculate_mmc_top_bottom(
-                    predictions, neutral_preds, targets, top_bottom
+                    predictions=predictions,
+                    neutral_preds=neutral_preds,
+                    targets=targets,
+                    top_bottom=top_bottom
                 )
             else:
                 mmc = (targets.values.reshape(-1, 1) * neutral_preds).mean(axis=0)
                 return pd.Series(mmc, index=predictions.columns)
-                
+            
         except Exception as e:
             logger.error(f"Error calculating MMC: {str(e)}")
             raise
@@ -188,16 +196,32 @@ class NumeraiNeutralizer:
         top_bottom: int
     ) -> pd.Series:
         """Helper method for MMC calculation with top/bottom filtering."""
-        mmc_values = []
-        for i in range(predictions.shape[1]):
-            col_preds = pd.Series(neutral_preds[:, i], index=predictions.index)
-            try:
-                filtered_preds = DataProcessor.filter_top_bottom(col_preds, top_bottom)
-                col_targets = targets.loc[filtered_preds.index]
-                mmc = (col_targets * filtered_preds).mean()
-            except ValueError as e:
-                logger.warning(f"Skipping column {i} in MMC calculation: {str(e)}")
-                mmc = 0
-            mmc_values.append(mmc)
+        try:
+            mmc_values = []
+            
+            for i in range(predictions.shape[1]):
+                pred_series = pd.Series(neutral_preds[:, i], index=predictions.index)
                 
-        return pd.Series(mmc_values, index=predictions.columns)
+                try:
+                    # Filter to top and bottom predictions
+                    filtered_preds = DataProcessor.filter_top_bottom(pred_series, top_bottom)
+                    
+                    # Get corresponding targets
+                    filtered_targets = targets.loc[filtered_preds.index]
+                    
+                    if len(filtered_preds) != 2 * top_bottom:
+                        raise ValueError(f"Expected {2 * top_bottom} predictions after filtering")
+                        
+                    # Calculate MMC for this column
+                    mmc = (filtered_targets * filtered_preds).mean()
+                    mmc_values.append(mmc)
+                    
+                except ValueError as e:
+                    logger.warning(f"Skipping column {i} in MMC calculation: {str(e)}")
+                    mmc_values.append(np.nan)
+                    
+            return pd.Series(mmc_values, index=predictions.columns)
+            
+        except Exception as e:
+            logger.error(f"Error in _calculate_mmc_top_bottom: {str(e)}")
+            raise

@@ -149,8 +149,8 @@ class NumeraiModel:
                 if len(target) != len(predictions):
                     raise ValueError(f"Target length ({len(target)}) does not match predictions length ({len(predictions)})")
                     
-                # Ensure target is aligned with predictions
-                target = target.reindex(predictions.index)
+                # Ensure target is aligned with predictions and sorted
+                target = target.reindex(predictions.index).sort_index()
                 if target.isna().any():
                     raise ValueError("Missing target values after alignment")
                     
@@ -159,7 +159,7 @@ class NumeraiModel:
                     if len(meta_model) != len(predictions):
                         raise ValueError("Meta model predictions length mismatch")
                         
-                    meta_model = meta_model.reindex(predictions.index)
+                    meta_model = meta_model.reindex(predictions.index).sort_index()
                     if meta_model.isna().any():
                         raise ValueError("Missing meta model values after alignment")
                 
@@ -174,25 +174,21 @@ class NumeraiModel:
                 # Calculate MMC if meta_model provided
                 if meta_model is not None:
                     logger.info("Calculating MMC...")
-                    
-                    # Calculate correlation with meta model predictions
-                    meta_correlation = self.neutralizer.correlator.pearson(
-                        target=target,
-                        predictions=meta_model
+                    # Use the enhanced calculate_mmc method
+                    mmc_scores = self.neutralizer.calculate_mmc(
+                        predictions=predictions,
+                        meta_model=meta_model,
+                        targets=target
                     )
-                    
-                    # Calculate correlation with our predictions
-                    our_correlation = self.neutralizer.correlator.pearson(
-                        target=target,
-                        predictions=predictions['prediction']
-                    )
-                    
-                    # MMC is the difference between our correlation and meta correlation
-                    metrics["mmc"] = float(our_correlation - meta_correlation)
+                    # Store both overall MMC and per-column scores
+                    metrics["mmc"] = float(mmc_scores.mean())
+                    metrics["mmc_per_column"] = mmc_scores.to_dict()
                     
                 # Calculate era-wise metrics if era_col provided
                 if era_col is not None:
                     era_scores = {}
+                    era_col = era_col.reindex(predictions.index).sort_index()
+                    
                     for era in era_col.unique():
                         mask = era_col == era
                         era_preds = predictions[mask]
@@ -235,7 +231,7 @@ class NumeraiModel:
         except Exception as e:
             logger.error(f"Error in predict_with_metrics: {str(e)}")
             raise
-                
+                    
     def get_feature_importance(self) -> Optional[pd.Series]:
         """Get feature importance if model supports it.
         
