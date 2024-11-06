@@ -22,9 +22,19 @@ class DataProcessor:
 
     @staticmethod
     def rank(df: pd.DataFrame, method: str = "average") -> pd.DataFrame:
-        """Rank transform with proper scaling to avoid numerical issues."""
+        """Rank transform with proper scaling to avoid numerical issues.
+        
+        Args:
+            df: DataFrame or Series to rank
+            method: Ranking method (default: "average")
+            
+        Returns:
+            Ranked data scaled to [epsilon, 1-epsilon]
+            
+        Note:
+            Automatically sorts index if needed for consistent results
+        """
         validate_data(df)
-        assert np.array_equal(df.index.sort_values(), df.index), "unsorted index"
         epsilon = 1e-8
         
         def safe_rank(s: pd.Series) -> pd.Series:
@@ -33,12 +43,21 @@ class DataProcessor:
                 
             if s.std() == 0:
                 return pd.Series(0.5, index=s.index)
+            
+            # Sort index if needed
+            if not s.index.is_monotonic_increasing:
+                s = s.sort_index()
                 
             ranks = s.rank(method=method)
             return (ranks - 1) / (len(ranks) - 1)
             
         if isinstance(df, pd.Series):
             df = df.to_frame()
+            
+        # Check if any column needs sorting
+        if not df.index.is_monotonic_increasing:
+            logger.debug("Automatically sorting non-monotonic index in rank transform")
+            df = df.sort_index()
             
         ranked = df.apply(safe_rank)
         return ranked.clip(epsilon, 1 - epsilon)
