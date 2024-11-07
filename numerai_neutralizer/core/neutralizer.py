@@ -1,13 +1,14 @@
+from typing import Dict, Optional
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional
 
 from numerai_neutralizer.core.data_processor import DataProcessor
 from numerai_neutralizer.core.correlation import CorrelationCalculator
 from numerai_neutralizer.metrics.feature_metrics import FeatureMetrics
-from numerai_neutralizer.utils.logging import logger
 from numerai_neutralizer.utils.validation import validate_data
-
+from numerai_neutralizer.utils.logging import (
+    debug, info, warning, exception, log_performance
+)
 
 class NumeraiNeutralizer:
     """Main class for feature neutralization and analysis."""
@@ -15,7 +16,12 @@ class NumeraiNeutralizer:
     def __init__(self):
         self.feature_metrics: Dict[str, FeatureMetrics] = {}
         self.correlator = CorrelationCalculator()
+        info(
+            "Initialized NumeraiNeutralizer",
+            {'component': 'NumeraiNeutralizer', 'action': 'init'}
+        )
     
+    @log_performance
     def neutralize(
         self,
         df: pd.DataFrame,
@@ -24,6 +30,16 @@ class NumeraiNeutralizer:
     ) -> pd.DataFrame:
         """Neutralize predictions against features."""
         try:
+            info(
+                "Starting neutralization",
+                {
+                    'action': 'neutralize',
+                    'predictions_shape': df.shape,
+                    'neutralizers_shape': neutralizers.shape,
+                    'proportion': proportion
+                }
+            )
+            
             # Input validation
             validate_data(df, "predictions")
             validate_data(neutralizers, "neutralizers")
@@ -36,12 +52,24 @@ class NumeraiNeutralizer:
             
             # Remove zero variance columns from neutralizers
             non_zero_cols = neutralizers.std() != 0
-            if not non_zero_cols.all():
-                logger.warning(f"Removing {(~non_zero_cols).sum()} zero variance neutralizer columns")
+            zero_var_count = (~non_zero_cols).sum()
+            
+            if zero_var_count > 0:
+                warning(
+                    f"Removing zero variance neutralizer columns",
+                    {
+                        'action': 'remove_zero_variance',
+                        'removed_columns': int(zero_var_count),
+                        'remaining_columns': int(non_zero_cols.sum())
+                    }
+                )
                 neutralizers = neutralizers.loc[:, non_zero_cols]
                 
             if neutralizers.empty:
-                logger.warning("No valid neutralizer columns, returning original predictions")
+                warning(
+                    "No valid neutralizer columns, returning original predictions",
+                    {'action': 'skip_neutralization', 'reason': 'no_valid_neutralizers'}
+                )
                 return df
                 
             # Add constant term for bias
@@ -55,15 +83,41 @@ class NumeraiNeutralizer:
             adjustments = proportion * neutralizer_arr.dot(least_squares)
             neutral = df.values - adjustments
             
+            info(
+                "Neutralization completed successfully",
+                {
+                    'action': 'neutralize_complete',
+                    'original_std': float(df.std().mean()),
+                    'neutralized_std': float(pd.DataFrame(neutral).std().mean()),
+                    'adjustment_magnitude': float(np.abs(adjustments).mean())
+                }
+            )
+            
             return pd.DataFrame(neutral, index=df.index, columns=df.columns)
             
         except Exception as e:
-            logger.error(f"Error during neutralization: {str(e)}")
+            exception(
+                "Error during neutralization",
+                {
+                    'action': 'neutralize_error',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)
+                }
+            )
             raise
 
+    @log_performance
     def fast_neutralize(self, v: np.ndarray, u: np.ndarray) -> np.ndarray:
         """Fast neutralization for single column case."""
         try:
+            debug(
+                "Starting fast neutralization",
+                {
+                    'action': 'fast_neutralize',
+                    'vector_length': len(v) if isinstance(v, np.ndarray) else 'unknown'
+                }
+            )
+            
             v = v.ravel()
             u = u.ravel()
             
@@ -75,53 +129,106 @@ class NumeraiNeutralizer:
                 raise ValueError("Cannot neutralize against a zero vector")
             
             projection_coefficient = (v @ u) / u_norm_squared
-            return v - u * projection_coefficient
+            result = v - u * projection_coefficient
+            
+            debug(
+                "Fast neutralization completed",
+                {
+                    'action': 'fast_neutralize_complete',
+                    'projection_coefficient': float(projection_coefficient),
+                    'result_mean': float(np.mean(result)),
+                    'result_std': float(np.std(result))
+                }
+            )
+            
+            return result
             
         except Exception as e:
-            logger.error(f"Error in fast neutralization: {str(e)}")
+            exception(
+                "Error in fast neutralization",
+                {
+                    'action': 'fast_neutralize_error',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)
+                }
+            )
             raise
 
+    @log_performance
     def calculate_feature_exposure(
         self,
         predictions: pd.Series,
         features: pd.DataFrame
     ) -> pd.Series:
-        """Calculate feature exposure of predictions to features.
+        """Calculate feature exposure of predictions to features."""
+        try:
+            info(
+                "Calculating feature exposure",
+                {
+                    'action': 'calculate_feature_exposure',
+                    'num_features': len(features.columns),
+                    'num_samples': len(predictions)
+                }
+            )
+            
+            # Validate inputs
+            validate_data(predictions, "predictions")
+            validate_data(features, "features")
+            
+            # Ensure predictions and features have aligned indices
+            predictions, features = predictions.align(features, join='inner', axis=0)
+            
+            if len(predictions) == 0:
+                raise ValueError("No overlapping indices between predictions and features.")
+                
+            # Standardize features
+            std = features.std()
+            zero_std_features = std[std == 0].index.tolist()
+            
+            if zero_std_features:
+                warning(
+                    "Found features with zero standard deviation",
+                    {
+                        'action': 'zero_std_warning',
+                        'zero_std_features': zero_std_features
+                    }
+                )
+                
+            standardized_features = (features - features.mean()) / std.replace(0, 1)
+            
+            # Compute exposure
+            exposures = standardized_features.apply(lambda x: predictions.corr(x))
+            
+            # Set exposure to zero for zero variance features
+            exposures.loc[zero_std_features] = 0.0
+            
+            # Handle NaN exposures
+            exposures = exposures.fillna(0.0)
+            
+            info(
+                "Feature exposure calculation completed",
+                {
+                    'action': 'feature_exposure_complete',
+                    'max_exposure': float(abs(exposures).max()),
+                    'mean_exposure': float(abs(exposures).mean()),
+                    'num_significant_exposures': int((abs(exposures) > 0.1).sum())
+                }
+            )
+            
+            return exposures
+            
+        except Exception as e:
+            exception(
+                "Error calculating feature exposure",
+                {
+                    'action': 'feature_exposure_error',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)
+                }
+            )
+            raise
 
-        Args:
-            predictions: A Series of predictions.
-            features: A DataFrame of features.
-
-        Returns:
-            A Series containing the exposure of the predictions to each feature.
-        """
-        # Validate inputs
-        validate_data(predictions, "predictions")
-        validate_data(features, "features")
-
-        # Ensure predictions and features have aligned indices
-        predictions, features = predictions.align(features, join='inner', axis=0)
-
-        # Check if any indices remain after alignment
-        if len(predictions) == 0:
-            raise ValueError("No overlapping indices between predictions and features.")
-
-        # Standardize features
-        std = features.std()
-        zero_std_features = std[std == 0].index.tolist()
-        standardized_features = (features - features.mean()) / std.replace(0, 1)
-
-        # Compute exposure
-        exposures = standardized_features.apply(lambda x: predictions.corr(x))
-
-        # Set exposure to zero for zero variance features
-        exposures.loc[zero_std_features] = 0.0
-
-        # Handle NaN exposures due to constant features or NaN in data
-        exposures = exposures.fillna(0.0)
-
-        return exposures
-
+    @log_performance
     def calculate_mmc(
         self,
         predictions: pd.DataFrame,
@@ -129,8 +236,17 @@ class NumeraiNeutralizer:
         targets: pd.Series,
         top_bottom: Optional[int] = None
     ) -> pd.Series:
-        """Calculate Meta-Model Contribution scores using Numerai's canonical method."""
+        """Calculate Meta-Model Contribution scores."""
         try:
+            info(
+                "Starting MMC calculation",
+                {
+                    'action': 'calculate_mmc',
+                    'predictions_shape': predictions.shape,
+                    'top_bottom': top_bottom
+                }
+            )
+            
             # Strict index alignment and sorting
             common_idx = predictions.index.intersection(meta_model.index).intersection(targets.index)
             if len(common_idx) == 0:
@@ -164,30 +280,59 @@ class NumeraiNeutralizer:
                         m.values
                     )
                 except ValueError as e:
-                    logger.warning(f"Skipping column {i} due to neutralization error: {str(e)}")
+                    warning(
+                        f"Skipping column {i} in MMC calculation",
+                        {
+                            'action': 'mmc_column_skip',
+                            'column': i,
+                            'error': str(e)
+                        }
+                    )
                     continue
             
-            # Process targets according to Numerai's scale
+            # Process targets
             if (targets >= 0).all() and (targets <= 1).all():
                 targets = targets * 4
             targets = targets - targets.mean()
             
-            # Calculate MMC with optional top/bottom filtering
+            # Calculate MMC
             if top_bottom:
-                return self._calculate_mmc_top_bottom(
+                result = self._calculate_mmc_top_bottom(
                     predictions=predictions,
                     neutral_preds=neutral_preds,
                     targets=targets,
                     top_bottom=top_bottom
                 )
             else:
-                mmc = (targets.values.reshape(-1, 1) * neutral_preds).mean(axis=0)
-                return pd.Series(mmc, index=predictions.columns)
+                result = pd.Series(
+                    (targets.values.reshape(-1, 1) * neutral_preds).mean(axis=0),
+                    index=predictions.columns
+                )
+            
+            info(
+                "MMC calculation completed",
+                {
+                    'action': 'mmc_complete',
+                    'mean_mmc': float(result.mean()),
+                    'max_mmc': float(result.max()),
+                    'min_mmc': float(result.min())
+                }
+            )
+            
+            return result
             
         except Exception as e:
-            logger.error(f"Error calculating MMC: {str(e)}")
+            exception(
+                "Error calculating MMC",
+                {
+                    'action': 'mmc_error',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)
+                }
+            )
             raise
 
+    @log_performance
     def _calculate_mmc_top_bottom(
         self,
         predictions: pd.DataFrame,
@@ -197,6 +342,14 @@ class NumeraiNeutralizer:
     ) -> pd.Series:
         """Helper method for MMC calculation with top/bottom filtering."""
         try:
+            debug(
+                "Starting top/bottom MMC calculation",
+                {
+                    'action': 'mmc_top_bottom',
+                    'top_bottom_count': top_bottom
+                }
+            )
+            
             mmc_values = []
             
             for i in range(predictions.shape[1]):
@@ -217,11 +370,38 @@ class NumeraiNeutralizer:
                     mmc_values.append(mmc)
                     
                 except ValueError as e:
-                    logger.warning(f"Skipping column {i} in MMC calculation: {str(e)}")
+                    warning(
+                        f"Skipping column {i} in top/bottom MMC calculation",
+                        {
+                            'action': 'mmc_top_bottom_skip',
+                            'column': i,
+                            'error': str(e)
+                        }
+                    )
                     mmc_values.append(np.nan)
-                    
-            return pd.Series(mmc_values, index=predictions.columns)
+            
+            result = pd.Series(mmc_values, index=predictions.columns)
+            
+            debug(
+                "Top/bottom MMC calculation completed",
+                {
+                    'action': 'mmc_top_bottom_complete',
+                    'mean_mmc': float(result.mean()),
+                    'max_mmc': float(result.max()),
+                    'min_mmc': float(result.min()),
+                    'nan_count': int(result.isna().sum())
+                }
+            )
+            
+            return result
             
         except Exception as e:
-            logger.error(f"Error in _calculate_mmc_top_bottom: {str(e)}")
+            exception(
+                "Error in top/bottom MMC calculation",
+                {
+                    'action': 'mmc_top_bottom_error',
+                    'error_type': type(e).__name__,
+                    'error_message': str(e)
+                }
+            )
             raise
