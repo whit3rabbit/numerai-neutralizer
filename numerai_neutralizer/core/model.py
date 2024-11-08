@@ -239,6 +239,11 @@ class NumeraiModel:
                     meta_model = meta_model.reindex(predictions.index).sort_index()
                     if meta_model.isna().any():
                         raise ValueError("Missing meta model values after alignment")
+                    
+                    # Ensure meta_model has a name
+                    if meta_model.name is None:
+                        meta_model = meta_model.copy()
+                        meta_model.name = 'meta_model'
                 
                 # Calculate correlations
                 info("Calculating correlation metrics")
@@ -352,6 +357,7 @@ class NumeraiModel:
                 }
             )
             raise
+
 
     @log_performance
     def get_feature_importance(self) -> Optional[pd.Series]:
