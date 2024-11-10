@@ -1,6 +1,6 @@
 # numerai-neutralizer
 
-A Python library for feature neutralization and analysis of Numerai predictions. This package provides tools for neutralizing predictions against feature exposures, calculating correlations, and analyzing model performance with Numerai-specific metrics.
+A robust Python library designed for feature neutralization and comprehensive analysis of Numerai predictions. This package offers tools to neutralize predictions against feature exposures, calculate key correlations, and analyze model performance with Numerai-specific metrics, including Meta-Model Contribution (MMC) and era-wise analysis.
 
 ## Installation
 
@@ -18,200 +18,96 @@ Requires Python 3.8 or later.
 from numerai_neutralizer import NumeraiNeutralizer, NumeraiModel
 import pandas as pd
 
-# Initialize neutralizer
-neutralizer = NumeraiNeutralizer()
-
-# Create predictions and feature data
-predictions_df = pd.DataFrame(...)  # Your predictions
-feature_df = pd.DataFrame(...)      # Your feature data
-
-# Neutralize predictions
-neutral_predictions = neutralizer.neutralize(
-    predictions_df,
-    feature_df,
-    proportion=1.0
-)
-```
-
-## Numerai Model Submission Example
-
-Here's a complete example of how to use the library for a Numerai model submission:
-
-```python
-from numerai_neutralizer import NumeraiNeutralizer, NumeraiModel
-import pandas as pd
-import cloudpickle
-
-# Assume you have:
-# - your_trained_model: Your trained model (sklearn, lightgbm, etc.)
-# - medium_features: List of feature names used for training
-# - med_serenity_feats: List of features to neutralize against
-
-# 1. Set up the neutralizer and model wrapper
+# Initialize components
 neutralizer = NumeraiNeutralizer()
 model = NumeraiModel(
-    model=your_trained_model,          # Your trained model
+    model=your_trained_model,  # Your trained model (sklearn API)
     neutralizer=neutralizer,
-    features=medium_features,          # Features used for prediction
-    neutralization_features=med_serenity_feats,  # Features to neutralize against
-    proportion=1.0                     # Full neutralization
+    features=feature_names,      # Features used in training
+    neutralization_features=neutralization_feature_names,  # Features to neutralize against (optional)
+    proportion=1.0             # Neutralization strength (0-1)
 )
 
-# 2. Create prediction function for Numerai submission
-def predict_neutral(live_features: pd.DataFrame) -> pd.DataFrame:
-    """Generate neutralized predictions for Numerai submission.
-    
-    Args:
-        live_features: DataFrame containing current Numerai features
-        
-    Returns:
-        DataFrame with neutralized and ranked predictions
-    """
-    return model.predict(live_features)
+# Load data (replace with your data loading logic)
+training_data = pd.read_parquet("training_data.parquet")
+tournament_data = pd.read_parquet("tournament_data.parquet")
 
-# 3. Test the pipeline
-live_features = pd.read_parquet("v5.0/live.parquet", columns=medium_features)
-predictions = predict_neutral(live_features)
+# Fit the model (if not already fitted)
+model.fit(training_data[feature_names], training_data["target"])
 
-# 4. Save for submission
-with open("feature_neutralization.pkl", "wb") as f:
-    f.write(cloudpickle.dumps(predict_neutral))
-```
+# Generate neutralized predictions
+predictions = model.predict(tournament_data)
 
-You can also get detailed metrics during development:
-
-```python
-# Get predictions with comprehensive metrics
+# Get predictions with metrics (optional, for analysis)
 predictions, metrics = model.predict_with_metrics(
-    X=live_features,
-    meta_model=meta_model_predictions,  # Optional: for MMC calculation
-    target=targets,                     # Optional: for correlation metrics
-    era_col='era'                      # Optional: for era-wise analysis
+    X=tournament_data,
+    target=tournament_data.get("target"),  # Include for correlation and MMC
+    meta_model=tournament_data.get("meta_model"), # Include for MMC if available
+    era_col="era"  # Include for era-wise metrics if available
 )
-
-# Access various metrics
-feature_exposure = metrics['feature_exposure']
-correlation = metrics['correlation']
-era_metrics = metrics['era_wise']
-mmc_scores = metrics['mmc']
 ```
 
-## Features
+## Key Features
 
-- **Feature Neutralization**: Remove unwanted feature exposures from predictions
-- **Correlation Metrics**: Calculate Numerai-specific correlation metrics
-- **MMC Calculation**: Compute Meta-Model Contribution scores
-- **Model Integration**: Wrapper for easy integration with any sklearn-compatible model
-- **Data Processing**: Utilities for common Numerai data transformations
-- **Performance Analysis**: Comprehensive metrics and diagnostics
+* **Feature Neutralization:** Mitigate unintended feature exposures, handling cases like zero-variance neutralizers.
+* **Correlation Analysis:** Compute Numerai-specific correlation and feature exposure metrics.
+* **MMC Calculation:** Calculate Meta-Model Contribution (MMC) scores, handling top/bottom scenarios and edge cases.
+* **Model Integration:**  `NumeraiModel` wrapper for easy integration with any model supporting the sklearn API (`.fit` and `.predict`).
+* **Data Processing:** Utilities for ranking, gaussianization, standardization, and other data transformations.
+* **Performance Evaluation:** Comprehensive metrics including era-wise analysis, correlation, feature exposure, MMC, and more.
+* **Robust Logging:** Structured logging with JSON output for detailed insights and debugging.
+* **Performance Monitoring:** `@log_performance` decorator tracks function execution times.
+* **Thorough Testing:**  Unit tests cover core functions, edge cases, and error handling.
+
 
 ## Core Components
 
-### NumeraiNeutralizer
+### `NumeraiNeutralizer`
 
-Main class for feature neutralization and analysis:
+Performs neutralization, feature exposure calculation, and MMC calculation.
 
 ```python
-from numerai_neutralizer import NumeraiNeutralizer
-
 neutralizer = NumeraiNeutralizer()
-
-# Basic neutralization
-neutral_preds = neutralizer.neutralize(
-    predictions,
-    neutralizers,
-    proportion=1.0
-)
-
-# Calculate MMC
-mmc_scores = neutralizer.calculate_mmc(
-    predictions,
-    meta_model,
-    targets
-)
+neutralized_predictions = neutralizer.neutralize(predictions, features, proportion=0.5)
+feature_exposures = neutralizer.calculate_feature_exposure(predictions, features)
+mmc_scores = neutralizer.calculate_mmc(predictions, meta_model_predictions, targets)
 ```
 
-### NumeraiModel
+### `NumeraiModel`
 
-Wrapper for models with integrated neutralization:
+Wraps your prediction model for seamless Numerai integration.
 
 ```python
-from numerai_neutralizer import NumeraiModel
-from sklearn.linear_model import LinearRegression
-
-model = NumeraiModel(
-    model=LinearRegression(),
-    neutralizer=neutralizer,
-    features=['feature1', 'feature2'],
-    neutralization_features=['feature1'],
-    proportion=1.0
-)
-
-# Get predictions with metrics
-predictions, metrics = model.predict_with_metrics(
-    X=feature_data,
-    meta_model=meta_model,
-    target=targets,
-    era_col='era'
-)
+model = NumeraiModel(your_model, neutralizer, features, neutralization_features, proportion)
+predictions = model.predict(data)
+predictions, metrics = model.predict_with_metrics(data, target, meta_model, era_col)
 ```
 
-### DataProcessor
+### `DataProcessor`
 
-Utilities for data transformation:
+Provides static methods for data transformations.
 
 ```python
-from numerai_neutralizer import DataProcessor
-
-# Rank transform
 ranked_data = DataProcessor.rank(data)
-
-# Gaussianize data
-gaussian_data = DataProcessor.gaussian(ranked_data)
-
-# Standardize
-standardized = DataProcessor.standardize(data)
-```
-
-## Advanced Usage
-
-### Feature Exposure Analysis
-
-```python
-# Get predictions with full metrics
-predictions, metrics = model.predict_with_metrics(
-    X=feature_data,
-    meta_model=meta_model,
-    target=targets,
-    era_col='era'
-)
-
-# Access feature exposure
-feature_exposure = metrics['feature_exposure']
-max_exposure = metrics['max_feature_exposure']
-```
-
-### Era-wise Analysis
-
-```python
-# Get era-wise metrics
-predictions, metrics = model.predict_with_metrics(
-    X=feature_data,
-    target=targets,
-    era_col='era'
-)
-
-# Access era metrics
-era_corr_mean = metrics['era_wise']['mean']
-era_corr_std = metrics['era_wise']['std']
-era_sharpe = metrics['era_wise']['sharpe']
+gaussian_data = DataProcessor.gaussian(data)
+standardized_data = DataProcessor.standardize(data)
+variance_normalized_data = DataProcessor.variance_normalize(data)
 ```
 
 ## Requirements
 
-The package requires Python 3.8 or later. Dependencies will be installed automatically with the package. Key dependencies include:
+Python 3.8 or later. Dependencies are automatically installed:
 
-- numpy >= 1.19.0
-- pandas >= 1.2.0
-- scipy >= 1.7.0
-- scikit-learn >= 0.24.0
+- numpy
+- pandas
+- scipy
+- scikit-learn
+
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request.
+
+## License
+
+MIT License
